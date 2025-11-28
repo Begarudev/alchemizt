@@ -51,6 +51,11 @@ The platform is organized as a multi-tier system with stateless API services, a 
 - **High Submission Volume**: During contests, submissions are accepted into a durable queue (e.g., Kafka/SQS). Real-time matches use synchronous gRPC to Referee; contests use async workers with priority lanes for near-time-limit entries. Rate limiting protects the Referee from bursts.
 - **Fault Tolerance**: Each service runs multiple pods across availability zones; queues buffer submissions if Referee nodes restart. Database writes leverage logical replication; nightly snapshots cover disaster recovery. WebSocket hubs use sticky sessions with fallback reconnection policies.
 
+### Prototype Status & Next Steps
+- The match orchestrator lobby slice is now prototyped end-to-end (service + frontend shell) using the contracts defined here. See `docs/prototype_service_frontend_plan.md` for scope, payloads, and UX details.
+- Shared contracts include `MatchRoom`, `RoomParticipant`, and `CountdownState`, allowing downstream services and clients to build against stable interfaces before persistence layers exist.
+- The frontend shell provides a reference integration path (TanStack Router/Query, Zustand, React Compiler-ready components) and can be extended as other services expose richer APIs.
+
 ### Assumptions & Open Questions
 1. Should the chemistry templates be versioned per puzzle to guarantee deterministic replays, or can we rely on global rulebook snapshots referenced by hash?
 2. What SLA is required for real-time match validation (e.g., 200 ms p95), and can the same Referee deployment satisfy contest throughput without separate clusters?
@@ -59,4 +64,3 @@ The platform is organized as a multi-tier system with stateless API services, a 
 5. How are large pathway graphs rendered in the client—do we stream pre-rendered SVGs or let the client rebuild from JSON, affecting bandwidth?
 6. What is the target peak concurrency during contests, and does it require multi-region WebSocket edges to keep latency acceptable globally?
 7. Should match history and replay blobs live in cold storage after a retention period to control database size, and how quickly must they be retrievable?
-

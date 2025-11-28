@@ -89,14 +89,14 @@ const buildParticipant = ({
 });
 
 const applyReadyState = (room: MatchRoom, participantId: string, readyFlag?: boolean): MatchRoom => {
-  const participants = room.participants.map((participant) => {
+  const participants = room.participants.map((participant: RoomParticipant) => {
     if (participant.id !== participantId) {
       return participant;
     }
     const nextReady = readyFlag ?? !participant.ready;
     return { ...participant, ready: nextReady };
   });
-  const readyCount = participants.filter((participant) => participant.ready).length;
+  const readyCount = participants.filter((participant: RoomParticipant) => participant.ready).length;
   const readyPercent = participants.length === 0 ? 0 : Math.round((readyCount / participants.length) * 100);
 
   let countdownState: CountdownState = room.countdown;
@@ -227,7 +227,7 @@ const service = createServiceApp({
         return;
       }
 
-      const existingParticipant = room.participants.find((participant) => participant.handle === handle);
+      const existingParticipant = room.participants.find((participant: RoomParticipant) => participant.handle === handle);
       if (existingParticipant) {
         res.json(room);
         return;
