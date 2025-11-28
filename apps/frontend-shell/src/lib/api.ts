@@ -1,4 +1,10 @@
-import type { MatchMode, MatchRoom, RoomParticipant } from "@alchemizt/contracts";
+import type {
+  CompetitiveDashboardPayload,
+  MatchMode,
+  MatchRoom,
+  MatchmakingTicketSummary,
+  RoomParticipant,
+} from "@alchemizt/contracts";
 
 const normalizeBaseUrl = (value: string): string => {
   if (!value) {
@@ -46,6 +52,21 @@ export interface JoinRoomPayload {
   readonly userId?: string;
 }
 
+export interface EnqueueMatchmakingPayload {
+  readonly handle: string;
+  readonly mode: MatchMode;
+  readonly partyHandles?: string[];
+}
+
+export interface MatchResultPayload {
+  readonly winnerHandle: string;
+  readonly loserHandle: string;
+  readonly mode: MatchMode;
+  readonly puzzleTier?: "standard" | "advanced" | "elite";
+  readonly refereeConfidence?: number;
+  readonly timeRemainingSeconds?: number;
+}
+
 export const fetchRooms = () => jsonRequest<{ rooms: MatchRoom[] }>("/rooms");
 
 export const createRoom = (payload: CreateRoomPayload) =>
@@ -73,5 +94,30 @@ export const startCountdown = (roomId: string) =>
   jsonRequest<MatchRoom>(`/rooms/${roomId}/countdown`, {
     method: "POST",
     body: JSON.stringify({ action: "start" }),
+  });
+
+export const fetchCompetitiveDashboard = (handle?: string) => {
+  const query = handle ? `?handle=${encodeURIComponent(handle)}` : "";
+  return jsonRequest<CompetitiveDashboardPayload>(`/competitive/dashboard${query}`);
+};
+
+export const enqueueMatchmaking = (payload: EnqueueMatchmakingPayload) =>
+  jsonRequest<{ ticket: MatchmakingTicketSummary; dashboard: CompetitiveDashboardPayload }>(
+    "/matchmaking/enqueue",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const cancelMatchmakingTicket = (ticketId: string) =>
+  jsonRequest<{ cancelled: boolean }>(`/matchmaking/tickets/${ticketId}/cancel`, {
+    method: "POST",
+  });
+
+export const submitMatchResult = (roomId: string, payload: MatchResultPayload) =>
+  jsonRequest(`/competitive/matches/${roomId}/result`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 

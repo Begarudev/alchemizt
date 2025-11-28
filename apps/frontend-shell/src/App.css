@@ -100,3 +100,114 @@ button:disabled {
   border-radius: 0.75rem;
   margin-bottom: 1rem;
 }
+
+.connection-pill {
+  margin-top: 1rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 0.85rem;
+  align-self: flex-start;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.25rem;
+  align-items: flex-end;
+}
+
+.queue-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.queue-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.ticket-pill {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.85rem;
+  background: rgba(92, 106, 196, 0.12);
+  border: 1px solid rgba(92, 106, 196, 0.4);
+}
+
+.ladder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.ladder-card {
+  padding: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  background: rgba(12, 16, 26, 0.85);
+  transition: border-color 150ms ease;
+}
+
+.ladder-card--active {
+  border-color: rgba(92, 106, 196, 0.8);
+}
+
+.ladder-metric {
+  margin: 0.35rem 0;
+  font-size: 0.9rem;
+}
+
+.queue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.queue-card {
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 12, 22, 0.85);
+}
+
+.queue-card__tickets {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.match-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.match-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.badge--bot {
+  background: rgba(92, 106, 196, 0.2);
+  color: #8ea0ff;
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+}

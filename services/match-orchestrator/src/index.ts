@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type { Response } from "express";
 import {
+  CompetitiveDashboardPayload,
+  CompetitiveMatchPreview,
+  CompetitiveProfile,
   CountdownState,
+  DivisionTier,
+  LadderDivision,
+  LadderRatingSnapshot,
   MatchMode,
   MatchRoom,
+  MatchmakingTicketSummary,
+  QueueModeSnapshot,
+  RatingDeltaPreview,
   RouteDefinition,
+  RoomCompetitiveContext,
   RoomParticipant,
   ServiceName,
+  TicketStatus,
 } from "@alchemizt/contracts";
 import { createServiceApp } from "@alchemizt/http-kit";
 
@@ -45,6 +56,36 @@ const routes: RouteDefinition[] = [
     method: "GET",
     path: "/rooms",
     description: "List all active prototype rooms",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "POST",
+    path: "/matchmaking/enqueue",
+    description: "Enter a player into the competitive matchmaking queue",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "POST",
+    path: "/matchmaking/tickets/:ticketId/cancel",
+    description: "Cancel an active matchmaking ticket",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "GET",
+    path: "/matchmaking/snapshot",
+    description: "Return queue state across all ladders",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "GET",
+    path: "/competitive/dashboard",
+    description: "Return ladder, rating, and queue data for the UI",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "POST",
+    path: "/competitive/matches/:roomId/result",
+    description: "Apply a competitive match result and update ratings",
     handledBy: ServiceName.MatchOrchestrator,
   },
 ];
@@ -87,6 +128,582 @@ const buildParticipant = ({
   role: role ?? "challenger",
   ready: false,
 });
+
+const DEFAULT_RATING = 1500;
+const DEFAULT_RD = 350;
+const DEFAULT_VOLATILITY = 0.06;
+const MAX_RD = 400;
+const MIN_RD = 35;
+const MATCH_HISTORY_LIMIT = 12;
+const MATCHMAKING_MODES: MatchMode[] = ["speedrun", "endurance", "sandbox"];
+const DIVISION_CONFIG: Array<{ division: LadderDivision; floor: number; ceiling: number }> = [
+  { division: "Bronze", floor: 0, ceiling: 1199 },
+  { division: "Argentum", floor: 1200, ceiling: 1399 },
+  { division: "Aurum", floor: 1400, ceiling: 1599 },
+  { division: "Platinum", floor: 1600, ceiling: 1799 },
+  { division: "Iridium", floor: 1800, ceiling: 1999 },
+  { division: "Philosopher", floor: 2000, ceiling: 2400 },
+];
+const DIVISION_TIERS: DivisionTier[] = ["V", "IV", "III", "II", "I"];
+const BOT_HANDLES = ["chem-bot-flux", "chem-bot-helix", "chem-bot-sol", "chem-bot-vial"];
+
+interface LadderRecordState {
+  ladder: MatchMode;
+  rating: number;
+  deviation: number;
+  volatility: number;
+  matchesPlayed: number;
+  provisionalMatches: number;
+  lastPlayedAtMs?: number;
+}
+
+interface ProfileRecordState {
+  handle: string;
+  region: string;
+  calibrationsRemaining: number;
+  hiddenRating: number;
+  specializations: string[];
+  ladders: Record<MatchMode, LadderRecordState>;
+  lastUpdatedMs: number;
+}
+
+interface MatchmakingTicketInternal {
+  ticketId: string;
+  handle: string;
+  mode: MatchMode;
+  rating: number;
+  deviation: number;
+  joinedAtMs: number;
+  status: TicketStatus;
+  partyHandles: string[];
+  isBot?: boolean;
+  matchedAtMs?: number;
+}
+
+const profileStore = new Map<string, ProfileRecordState>();
+const matchmakingTickets = new Map<string, MatchmakingTicketInternal>();
+const ticketsByHandle = new Map<string, string>();
+const queueByMode: Record<MatchMode, MatchmakingTicketInternal[]> = {
+  speedrun: [],
+  endurance: [],
+  sandbox: [],
+};
+const pendingCompetitiveMatches: CompetitiveMatchPreview[] = [];
+
+const pickDivisionTier = (rating: number): { division: LadderDivision; tier: DivisionTier } => {
+  const config =
+    DIVISION_CONFIG.find((entry) => rating >= entry.floor && rating <= entry.ceiling) ??
+    DIVISION_CONFIG[DIVISION_CONFIG.length - 1];
+  const span = config.ceiling === Infinity ? 200 : config.ceiling - config.floor;
+  const clampedSpan = span > 0 ? span : 200;
+  const relative = Math.min(Math.max(rating - config.floor, 0), clampedSpan);
+  const tierIndex = Math.max(
+    0,
+    Math.min(
+      DIVISION_TIERS.length - 1,
+      DIVISION_TIERS.length - 1 - Math.floor((relative / clampedSpan) * DIVISION_TIERS.length),
+    ),
+  );
+  return { division: config.division, tier: DIVISION_TIERS[tierIndex] };
+};
+
+const getOrCreateProfile = (handle: string): ProfileRecordState => {
+  const normalized = handle.trim().toLowerCase();
+  const existing = profileStore.get(normalized);
+  if (existing) {
+    return existing;
+  }
+  const ladderDefaults = MATCHMAKING_MODES.reduce<Record<MatchMode, LadderRecordState>>(
+    (acc, mode) => {
+      acc[mode] = {
+        ladder: mode,
+        rating: DEFAULT_RATING,
+        deviation: DEFAULT_RD,
+        volatility: DEFAULT_VOLATILITY,
+        matchesPlayed: 0,
+        provisionalMatches: 5,
+      };
+      return acc;
+    },
+    {} as Record<MatchMode, LadderRecordState>,
+  );
+  const profile: ProfileRecordState = {
+    handle: normalized,
+    region: "NA",
+    calibrationsRemaining: 3,
+    hiddenRating: DEFAULT_RATING + Math.round(Math.random() * 60 - 30),
+    specializations: ["Organometallic", "Photoredox"].slice(0, 1 + Math.floor(Math.random() * 2)),
+    ladders: ladderDefaults,
+    lastUpdatedMs: Date.now(),
+  };
+  profileStore.set(normalized, profile);
+  return profile;
+};
+
+const inflateDeviationForIdle = (ladder: LadderRecordState) => {
+  if (!ladder.lastPlayedAtMs) {
+    return;
+  }
+  const weeksIdle = Math.floor((Date.now() - ladder.lastPlayedAtMs) / (7 * 24 * 60 * 60 * 1000));
+  if (weeksIdle <= 0) {
+    return;
+  }
+  const inflated = ladder.deviation * Math.min(1 + weeksIdle * 0.02, MAX_RD / ladder.deviation);
+  ladder.deviation = Math.min(MAX_RD, inflated);
+};
+
+const computeWinChance = (ratingA: number, ratingB: number) =>
+  1 / (1 + 10 ** ((ratingB - ratingA) / 400));
+
+const computeKFactor = (ladder: LadderRecordState, mode: MatchMode) => {
+  const rdScalar = Math.min(1.5, Math.max(0.5, ladder.deviation / 200));
+  const modeScalar = mode === "endurance" ? 1.1 : mode === "sandbox" ? 0.25 : 1;
+  return 24 * rdScalar * modeScalar;
+};
+
+const buildRatingPreview = (
+  a: MatchmakingTicketInternal,
+  b: MatchmakingTicketInternal,
+): RatingDeltaPreview[] => {
+  const winChanceA = computeWinChance(a.rating, b.rating);
+  const winChanceB = computeWinChance(b.rating, a.rating);
+  const kA = computeKFactor(
+    {
+      ladder: a.mode,
+      rating: a.rating,
+      deviation: a.deviation,
+      volatility: DEFAULT_VOLATILITY,
+      matchesPlayed: 0,
+      provisionalMatches: 0,
+    },
+    a.mode,
+  );
+  const kB = computeKFactor(
+    {
+      ladder: b.mode,
+      rating: b.rating,
+      deviation: b.deviation,
+      volatility: DEFAULT_VOLATILITY,
+      matchesPlayed: 0,
+      provisionalMatches: 0,
+    },
+    b.mode,
+  );
+  const winDeltaA = Number((kA * (1 - winChanceA)).toFixed(1));
+  const lossDeltaA = Number((-kA * winChanceA).toFixed(1));
+  const winDeltaB = Number((kB * (1 - winChanceB)).toFixed(1));
+  const lossDeltaB = Number((-kB * winChanceB).toFixed(1));
+  return [
+    {
+      handle: a.handle,
+      winChance: Number(winChanceA.toFixed(2)),
+      expectedDelta: Number(((winDeltaA + lossDeltaA) / 2).toFixed(1)),
+      winDelta: winDeltaA,
+      lossDelta: lossDeltaA,
+    },
+    {
+      handle: b.handle,
+      winChance: Number(winChanceB.toFixed(2)),
+      expectedDelta: Number(((winDeltaB + lossDeltaB) / 2).toFixed(1)),
+      winDelta: winDeltaB,
+      lossDelta: lossDeltaB,
+    },
+  ];
+};
+
+const summarizeLadder = (ladder: LadderRecordState): LadderRatingSnapshot => {
+  const { division, tier } = pickDivisionTier(ladder.rating);
+  return {
+    ladder: ladder.ladder,
+    rating: Math.round(ladder.rating),
+    deviation: Math.round(ladder.deviation),
+    volatility: Number(ladder.volatility.toFixed(4)),
+    matchesPlayed: ladder.matchesPlayed,
+    lastPlayedAt: ladder.lastPlayedAtMs ? new Date(ladder.lastPlayedAtMs).toISOString() : undefined,
+    provisionalMatches: Math.max(0, ladder.provisionalMatches),
+    division,
+    tier,
+  };
+};
+
+const buildProfilePayload = (profile: ProfileRecordState): CompetitiveProfile => ({
+  handle: profile.handle,
+  region: profile.region,
+  calibrationsRemaining: profile.calibrationsRemaining,
+  hiddenRating: profile.hiddenRating,
+  specializations: profile.specializations,
+  ladders: {
+    speedrun: summarizeLadder(profile.ladders.speedrun),
+    endurance: summarizeLadder(profile.ladders.endurance),
+    sandbox: summarizeLadder(profile.ladders.sandbox),
+  },
+  lastUpdated: new Date(profile.lastUpdatedMs).toISOString(),
+});
+
+const toTicketSummary = (ticket: MatchmakingTicketInternal): MatchmakingTicketSummary => {
+  const waitSeconds = Math.round((Date.now() - ticket.joinedAtMs) / 1000);
+  const spreadCap =
+    ticket.mode === "sandbox"
+      ? 400
+      : waitSeconds >= 90
+        ? 360
+        : waitSeconds >= 60
+          ? 280
+          : waitSeconds >= 30
+            ? 200
+            : 120;
+  return {
+    ticketId: ticket.ticketId,
+    handle: ticket.handle,
+    mode: ticket.mode,
+    rating: Math.round(ticket.rating),
+    deviation: Math.round(ticket.deviation),
+    joinedAt: new Date(ticket.joinedAtMs).toISOString(),
+    waitSeconds,
+    spreadCap,
+    status: ticket.status,
+    partyHandles: ticket.partyHandles.length > 0 ? ticket.partyHandles : undefined,
+    isBot: ticket.isBot,
+  };
+};
+
+const computeSpreadCap = (ticket: MatchmakingTicketInternal) => {
+  const waitSeconds = Math.round((Date.now() - ticket.joinedAtMs) / 1000);
+  if (ticket.mode === "sandbox") {
+    return 400;
+  }
+  if (waitSeconds >= 90) {
+    return 360;
+  }
+  if (waitSeconds >= 60) {
+    return 280;
+  }
+  if (waitSeconds >= 30) {
+    return 200;
+  }
+  return 120;
+};
+
+interface EnqueueOptions {
+  readonly partyHandles?: string[];
+  readonly isBot?: boolean;
+  readonly ratingOverride?: number;
+  readonly deviationOverride?: number;
+}
+
+const enqueueTicket = (handle: string, mode: MatchMode, options?: EnqueueOptions): MatchmakingTicketInternal => {
+  const normalized = options?.isBot ? handle : handle.trim().toLowerCase();
+  if (!options?.isBot) {
+    const existingTicketId = ticketsByHandle.get(normalized);
+    if (existingTicketId) {
+      const existing = matchmakingTickets.get(existingTicketId);
+      if (existing) {
+        return existing;
+      }
+    }
+  }
+  const profile = getOrCreateProfile(normalized);
+  const ladder = profile.ladders[mode];
+  inflateDeviationForIdle(ladder);
+  const effectiveRating =
+    options?.ratingOverride ??
+    (profile.calibrationsRemaining > 0 ? profile.hiddenRating : ladder.rating);
+  const deviation = options?.deviationOverride ?? ladder.deviation;
+  const ticket: MatchmakingTicketInternal = {
+    ticketId: `ticket_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`,
+    handle: normalized,
+    mode,
+    rating: Math.round(effectiveRating),
+    deviation,
+    joinedAtMs: Date.now(),
+    status: "searching",
+    partyHandles: options?.partyHandles ?? [],
+    isBot: options?.isBot,
+  };
+  queueByMode[mode].push(ticket);
+  matchmakingTickets.set(ticket.ticketId, ticket);
+  if (!options?.isBot) {
+    ticketsByHandle.set(normalized, ticket.ticketId);
+  }
+  return ticket;
+};
+
+const cancelTicket = (ticketId: string): boolean => {
+  const ticket = matchmakingTickets.get(ticketId);
+  if (!ticket || ticket.status !== "searching") {
+    return false;
+  }
+  ticket.status = "expired";
+  queueByMode[ticket.mode] = queueByMode[ticket.mode].filter((entry) => entry.ticketId !== ticketId);
+  matchmakingTickets.delete(ticketId);
+  if (!ticket.isBot) {
+    ticketsByHandle.delete(ticket.handle);
+  }
+  return true;
+};
+
+const ensureBotForMode = (mode: MatchMode) => {
+  const queue = queueByMode[mode].filter((ticket) => ticket.status === "searching");
+  if (queue.length === 0) {
+    return;
+  }
+  const longestWait = Math.max(...queue.map((ticket) => (Date.now() - ticket.joinedAtMs) / 1000));
+  const hasBot = queue.some((ticket) => ticket.isBot);
+  if (hasBot || longestWait < 45) {
+    return;
+  }
+  const averageRating = queue.reduce((sum, ticket) => sum + ticket.rating, 0) / queue.length;
+  const botHandle = `${
+    BOT_HANDLES[Math.floor(Math.random() * BOT_HANDLES.length)]
+  }-${mode}-${Math.floor(Math.random() * 1000)}`;
+  enqueueTicket(botHandle, mode, {
+    isBot: true,
+    ratingOverride: Math.round(averageRating - 60),
+    deviationOverride: 65,
+  });
+};
+
+const createRatedRoomFromTickets = (
+  mode: MatchMode,
+  a: MatchmakingTicketInternal,
+  b: MatchmakingTicketInternal,
+  ratingSpread: number,
+) => {
+  const countdownSeconds = mode === "endurance" ? 8 : 5;
+  const totalSeconds = mode === "endurance" ? 900 : 300;
+  const puzzleId =
+    mode === "sandbox" ? "pz_sandbox_queue" : mode === "endurance" ? "pz_endurance_prime" : "pz_speed_alpha";
+  const roomId = `rated_${Date.now()}_${Math.floor(Math.random() * 10_000)}`;
+  const timestamp = nowIso();
+  const participants = [
+    buildParticipant({ handle: a.handle, role: "host" }),
+    buildParticipant({ handle: b.handle, role: "challenger" }),
+  ];
+  const expectedDeltas = buildRatingPreview(a, b);
+  const competitive: RoomCompetitiveContext = {
+    isRated: mode !== "sandbox",
+    queueTicketIds: [a.ticketId, b.ticketId],
+    ratingSpread,
+    expectedDeltas,
+    botFilled: Boolean(a.isBot || b.isBot),
+  };
+  const room: MatchRoom = {
+    id: roomId,
+    puzzleId,
+    mode,
+    websocketChannel: `match:${roomId}`,
+    participants,
+    timerConfig: {
+      countdownSeconds,
+      totalSeconds,
+    },
+    status: "lobby",
+    countdown: defaultCountdown(countdownSeconds),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    competitive,
+  };
+  upsertRoom(room);
+  pendingCompetitiveMatches.unshift({
+    roomId,
+    mode,
+    handles: participants.map((entry) => entry.handle),
+    ratingSpread,
+    createdAt: timestamp,
+    expectedDeltas,
+    botFilled: competitive.botFilled,
+  });
+  if (pendingCompetitiveMatches.length > MATCH_HISTORY_LIMIT) {
+    pendingCompetitiveMatches.pop();
+  }
+};
+
+const processQueueForMode = (mode: MatchMode) => {
+  ensureBotForMode(mode);
+  const queue = queueByMode[mode].filter((ticket) => ticket.status === "searching");
+  queue.sort((a, b) => a.rating - b.rating);
+  const claimed = new Set<string>();
+  for (let i = 0; i < queue.length; i += 1) {
+    const ticket = queue[i];
+    if (claimed.has(ticket.ticketId)) {
+      continue;
+    }
+    const spreadA = computeSpreadCap(ticket);
+    for (let j = i + 1; j < queue.length; j += 1) {
+      const candidate = queue[j];
+      if (claimed.has(candidate.ticketId)) {
+        continue;
+      }
+      const spreadB = computeSpreadCap(candidate);
+      const allowedSpread = Math.min(spreadA, spreadB);
+      const ratingSpread = Math.abs(ticket.rating - candidate.rating);
+      if (ratingSpread <= allowedSpread) {
+        claimed.add(ticket.ticketId);
+        claimed.add(candidate.ticketId);
+        ticket.status = "matched";
+        candidate.status = "matched";
+        ticket.matchedAtMs = Date.now();
+        candidate.matchedAtMs = ticket.matchedAtMs;
+        if (!ticket.isBot) {
+          ticketsByHandle.delete(ticket.handle);
+        }
+        if (!candidate.isBot) {
+          ticketsByHandle.delete(candidate.handle);
+        }
+        createRatedRoomFromTickets(mode, ticket, candidate, allowedSpread);
+        break;
+      }
+    }
+  }
+  queueByMode[mode] = queueByMode[mode].filter((ticket) => ticket.status === "searching");
+};
+
+const runMatchmaking = () => {
+  MATCHMAKING_MODES.forEach((mode) => processQueueForMode(mode));
+};
+
+const buildQueueSnapshots = (): QueueModeSnapshot[] =>
+  MATCHMAKING_MODES.map((mode) => {
+    const queue = queueByMode[mode].filter((ticket) => ticket.status === "searching");
+    const queueDepth = queue.length;
+    const tickets = queue
+      .slice()
+      .sort((a, b) => a.joinedAtMs - b.joinedAtMs)
+      .map(toTicketSummary)
+      .slice(0, 6);
+    const averageRating =
+      queueDepth === 0 ? 0 : Math.round(queue.reduce((sum, ticket) => sum + ticket.rating, 0) / queueDepth);
+    const longestWaitSeconds =
+      queueDepth === 0 ? 0 : Math.max(...queue.map((ticket) => Math.round((Date.now() - ticket.joinedAtMs) / 1000)));
+    return {
+      mode,
+      queueDepth,
+      averageRating,
+      longestWaitSeconds,
+      tickets,
+    };
+  });
+
+const buildDashboardPayload = (handle?: string): CompetitiveDashboardPayload => {
+  runMatchmaking();
+  const normalizedHandle = handle?.trim().toLowerCase();
+  const profile = normalizedHandle ? buildProfilePayload(getOrCreateProfile(normalizedHandle)) : undefined;
+  const activeTicketId = normalizedHandle ? ticketsByHandle.get(normalizedHandle) : undefined;
+  const ticketEntry =
+    activeTicketId && matchmakingTickets.get(activeTicketId)?.status === "searching"
+      ? matchmakingTickets.get(activeTicketId)
+      : undefined;
+  const activeTicket = ticketEntry ? toTicketSummary(ticketEntry) : undefined;
+  return {
+    generatedAt: nowIso(),
+    profile,
+    activeTicket,
+    queues: buildQueueSnapshots(),
+    pendingMatches: pendingCompetitiveMatches.slice(0, MATCH_HISTORY_LIMIT),
+  };
+};
+
+interface MatchResolutionPayload {
+  winnerHandle: string;
+  loserHandle: string;
+  mode: MatchMode;
+  puzzleTier?: "standard" | "advanced" | "elite";
+  refereeConfidence?: number;
+  timeRemainingSeconds?: number;
+}
+
+const computeContextScalar = ({
+  mode,
+  puzzleTier,
+  timeRemainingSeconds,
+  refereeConfidence,
+}: MatchResolutionPayload): number => {
+  const puzzleScalar = puzzleTier === "elite" ? 1.25 : puzzleTier === "advanced" ? 1.1 : 1;
+  const timeScalar =
+    typeof timeRemainingSeconds === "number" ? 1 + Math.max(-0.2, Math.min(0.2, timeRemainingSeconds / 300)) : 1;
+  const confidenceScalar = refereeConfidence ?? 0.92;
+  const modeScalar = mode === "sandbox" ? 0.2 : mode === "endurance" ? 1.1 : 1;
+  return puzzleScalar * timeScalar * confidenceScalar * modeScalar;
+};
+
+const applyRatingDelta = (
+  handle: string,
+  outcome: 1 | 0,
+  opponentHandle: string,
+  payload: MatchResolutionPayload,
+): RatingDeltaPreview => {
+  const profile = getOrCreateProfile(handle);
+  const opponentProfile = getOrCreateProfile(opponentHandle);
+  const ladder = profile.ladders[payload.mode];
+  const opponentLadder = opponentProfile.ladders[payload.mode];
+  inflateDeviationForIdle(ladder);
+  inflateDeviationForIdle(opponentLadder);
+  const winChance = computeWinChance(ladder.rating, opponentLadder.rating);
+  const baseK = computeKFactor(ladder, payload.mode);
+  const contextScalar = computeContextScalar(payload);
+  let delta = Number(((outcome - winChance) * baseK * contextScalar).toFixed(2));
+  if (payload.mode === "sandbox") {
+    delta = Math.max(-5, Math.min(5, delta));
+  }
+  const projectedWinDelta = Number((baseK * contextScalar * (1 - winChance)).toFixed(2));
+  const projectedLossDelta = Number((-baseK * contextScalar * winChance).toFixed(2));
+  ladder.rating = Math.round(ladder.rating + delta);
+  ladder.deviation = Math.min(MAX_RD, Math.max(MIN_RD, ladder.deviation * 0.92));
+  ladder.matchesPlayed += 1;
+  ladder.provisionalMatches = Math.max(0, ladder.provisionalMatches - 1);
+  ladder.lastPlayedAtMs = Date.now();
+  profile.calibrationsRemaining = Math.max(0, profile.calibrationsRemaining - 1);
+  profile.lastUpdatedMs = Date.now();
+  if (Math.abs(delta) > baseK * 0.8) {
+    ladder.volatility = Math.min(0.35, ladder.volatility * 1.05);
+  } else {
+    ladder.volatility = Math.max(0.02, ladder.volatility * 0.98);
+  }
+  return {
+    handle,
+    winChance: Number(winChance.toFixed(2)),
+    expectedDelta: delta,
+    winDelta: projectedWinDelta,
+    lossDelta: projectedLossDelta,
+  };
+};
+
+const applyMatchResult = (roomId: string, payload: MatchResolutionPayload) => {
+  const winnerDelta = applyRatingDelta(payload.winnerHandle, 1, payload.loserHandle, payload);
+  const loserDelta = applyRatingDelta(payload.loserHandle, 0, payload.winnerHandle, payload);
+  const deltas: RatingDeltaPreview[] = [winnerDelta, loserDelta];
+  const room = activeRooms.get(roomId);
+  if (room?.competitive?.queueTicketIds) {
+    room.competitive.queueTicketIds.forEach((ticketId) => matchmakingTickets.delete(ticketId));
+  }
+  if (room) {
+    const nextCompetitive: RoomCompetitiveContext = room.competitive
+      ? { ...room.competitive, expectedDeltas: deltas }
+      : { isRated: false, expectedDeltas: deltas };
+    activeRooms.set(roomId, {
+      ...room,
+      status: "in_progress",
+      countdown: { ...room.countdown, state: "running", startedAt: nowIso() },
+      competitive: nextCompetitive,
+    });
+  }
+  const matchIndex = pendingCompetitiveMatches.findIndex((entry) => entry.roomId === roomId);
+  if (matchIndex >= 0) {
+    pendingCompetitiveMatches[matchIndex] = {
+      ...pendingCompetitiveMatches[matchIndex],
+      expectedDeltas: deltas,
+    };
+  }
+  return {
+    roomId,
+    mode: payload.mode,
+    appliedAt: nowIso(),
+    deltas,
+    profiles: [payload.winnerHandle, payload.loserHandle].map((handle) =>
+      buildProfilePayload(getOrCreateProfile(handle)),
+    ),
+  };
+};
 
 const applyReadyState = (room: MatchRoom, participantId: string, readyFlag?: boolean): MatchRoom => {
   const participants = room.participants.map((participant: RoomParticipant) => {
@@ -259,6 +876,73 @@ const service = createServiceApp({
 
     router.get("/rooms", (_req, res) => {
       res.json({ rooms: Array.from(activeRooms.values()) });
+    });
+
+    router.post("/matchmaking/enqueue", (req, res) => {
+      const handle: string | undefined = req.body?.handle;
+      const mode: MatchMode = req.body?.mode ?? "speedrun";
+      if (!handle) {
+        res.status(400).json({ error: "handle_required" });
+        return;
+      }
+      if (!MATCHMAKING_MODES.includes(mode)) {
+        res.status(400).json({ error: "invalid_mode" });
+        return;
+      }
+      const ticket = enqueueTicket(handle, mode, {
+        partyHandles: Array.isArray(req.body?.partyHandles) ? req.body.partyHandles : [],
+      });
+      runMatchmaking();
+      res.status(201).json({
+        ticket: toTicketSummary(ticket),
+        dashboard: buildDashboardPayload(handle),
+      });
+    });
+
+    router.post("/matchmaking/tickets/:ticketId/cancel", (req, res) => {
+      const cancelled = cancelTicket(req.params.ticketId);
+      if (!cancelled) {
+        res.status(404).json({ error: "ticket_not_found" });
+        return;
+      }
+      res.json({ cancelled: true });
+    });
+
+    router.get("/matchmaking/snapshot", (_req, res) => {
+      res.json({
+        generatedAt: nowIso(),
+        queues: buildQueueSnapshots(),
+        pendingMatches: pendingCompetitiveMatches.slice(0, MATCH_HISTORY_LIMIT),
+      });
+    });
+
+    router.get("/competitive/dashboard", (req, res) => {
+      const handle = typeof req.query.handle === "string" ? req.query.handle : undefined;
+      const payload: CompetitiveDashboardPayload = buildDashboardPayload(handle);
+      res.json(payload);
+    });
+
+    router.post("/competitive/matches/:roomId/result", (req, res) => {
+      const winnerHandle: string | undefined = req.body?.winnerHandle;
+      const loserHandle: string | undefined = req.body?.loserHandle;
+      const mode: MatchMode = req.body?.mode ?? "speedrun";
+      if (!winnerHandle || !loserHandle) {
+        res.status(400).json({ error: "winner_and_loser_required" });
+        return;
+      }
+      if (!MATCHMAKING_MODES.includes(mode)) {
+        res.status(400).json({ error: "invalid_mode" });
+        return;
+      }
+      const payload = applyMatchResult(req.params.roomId, {
+        winnerHandle: winnerHandle.trim().toLowerCase(),
+        loserHandle: loserHandle.trim().toLowerCase(),
+        mode,
+        puzzleTier: req.body?.puzzleTier,
+        refereeConfidence: req.body?.refereeConfidence,
+        timeRemainingSeconds: req.body?.timeRemainingSeconds,
+      });
+      res.json(payload);
     });
   },
 });

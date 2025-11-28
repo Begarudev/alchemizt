@@ -1,15 +1,18 @@
 import { useState, useMemo, useCallback } from "react";
 import type { FormEvent } from "react";
-import type { MatchRoom } from "@alchemizt/contracts";
+import type { MatchMode, MatchRoom, QueueModeSnapshot } from "@alchemizt/contracts";
 import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import RoomCard from "../components/RoomCard";
 import {
   MATCH_SERVICE_URL,
   createRoom,
   fetchRooms,
+  fetchCompetitiveDashboard,
   joinRoom,
   startCountdown,
   toggleReady,
+  enqueueMatchmaking,
+  cancelMatchmakingTicket,
 } from "../lib/api";
 import { usePreferencesStore } from "../store/preferences";
 import "../App.css";
@@ -24,8 +27,17 @@ const useInvalidateRooms = () => {
   );
 };
 
+const useInvalidateDashboard = () => {
+  const queryClient = useQueryClient();
+  return useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ["competitive-dashboard"] }),
+    [queryClient],
+  );
+};
+
 export const LobbyPage = () => {
   const invalidateRooms = useInvalidateRooms();
+  const invalidateDashboard = useInvalidateDashboard();
   const {
     hostHandle,
     participantHandle,
@@ -41,11 +53,20 @@ export const LobbyPage = () => {
     setTotalSeconds,
   } = usePreferencesStore();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [queueMode, setQueueMode] = useState<MatchMode>("speedrun");
 
   const roomsQuery = useQuery({
     queryKey: ["rooms"],
     queryFn: fetchRooms,
     select: (data) => data.rooms ?? [],
+    refetchInterval: POLL_MS,
+  });
+
+  const dashboardHandle = participantHandle || hostHandle;
+  const competitiveQuery = useQuery({
+    queryKey: ["competitive-dashboard", dashboardHandle],
+    queryFn: () => fetchCompetitiveDashboard(dashboardHandle),
+    enabled: Boolean(dashboardHandle),
     refetchInterval: POLL_MS,
   });
 
@@ -101,6 +122,28 @@ export const LobbyPage = () => {
     },
   });
 
+  const queueMutation = useMutation({
+    mutationFn: () => enqueueMatchmaking({ handle: participantHandle, mode: queueMode }),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateDashboard();
+    },
+    onError: (error: unknown) => {
+      setActionError(error instanceof Error ? error.message : "Unable to enter queue");
+    },
+  });
+
+  const cancelTicketMutation = useMutation({
+    mutationFn: (ticketId: string) => cancelMatchmakingTicket(ticketId),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateDashboard();
+    },
+    onError: (error: unknown) => {
+      setActionError(error instanceof Error ? error.message : "Unable to leave queue");
+    },
+  });
+
   const handleCreateRoom = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -145,14 +188,54 @@ export const LobbyPage = () => {
     [countdownMutation],
   );
 
-  const heroSubtitle = useMemo(() => {
-    const suffix = roomsQuery.isLoading
-      ? "syncing lobby state..."
-      : `connected to ${MATCH_SERVICE_URL}`;
-    return `Prototype lobby orchestration · ${suffix}`;
-  }, [roomsQuery.isLoading]);
+  const handleQueueJoin = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!participantHandle) {
+        setActionError("Provide a participant handle to enter the queue");
+        return;
+      }
+      queueMutation.mutate();
+    },
+    [participantHandle, queueMutation],
+  );
+
+  const activeTicketId = competitiveQuery.data?.activeTicket?.ticketId;
+  const handleQueueLeave = useCallback(() => {
+    if (!activeTicketId) {
+      setActionError("No active ticket to cancel");
+      return;
+    }
+    cancelTicketMutation.mutate(activeTicketId);
+  }, [activeTicketId, cancelTicketMutation]);
 
   const rooms = roomsQuery.data ?? [];
+  const queueSnapshots = competitiveQuery.data?.queues ?? [];
+  const totalQueueDepth = queueSnapshots.reduce((sum, snapshot) => sum + snapshot.queueDepth, 0);
+  const pendingMatches = competitiveQuery.data?.pendingMatches ?? [];
+  const profile = competitiveQuery.data?.profile;
+  const activeTicket = competitiveQuery.data?.activeTicket;
+
+  const heroSubtitle = useMemo(() => {
+    const lobbyStatus = roomsQuery.isLoading ? "syncing rooms" : `${rooms.length} room(s) live`;
+    const queueStatus = competitiveQuery.isLoading
+      ? "queue telemetry warming up"
+      : `${totalQueueDepth} players in matchmaking`;
+    return `Stage 6 ladder systems · ${lobbyStatus} · ${queueStatus}`;
+  }, [competitiveQuery.isLoading, rooms.length, roomsQuery.isLoading, totalQueueDepth]);
+
+  const ladderEntries = useMemo(() => {
+    if (!profile) {
+      return [];
+    }
+    const ladderOrder: MatchMode[] = ["speedrun", "endurance", "sandbox"];
+    return ladderOrder.map((ladderMode) => ({
+      mode: ladderMode,
+      snapshot: profile.ladders[ladderMode],
+      isActive: mode === ladderMode,
+    }));
+  }, [mode, profile]);
+
   const isMutating =
     createRoomMutation.isPending ||
     joinRoomMutation.isPending ||
@@ -163,10 +246,11 @@ export const LobbyPage = () => {
     <div className="app-shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Stage 5 Prototype</p>
-          <h1>Match Orchestrator Playground</h1>
+          <p className="eyebrow">Stage 6 Prototype</p>
+          <h1>Competitive Matchmaking Playground</h1>
           <p>{heroSubtitle}</p>
         </div>
+        <p className="connection-pill">Connected to {MATCH_SERVICE_URL}</p>
       </header>
 
       <main>
@@ -229,26 +313,168 @@ export const LobbyPage = () => {
         </section>
 
         <section className="panel">
-          <h2>Control handle</h2>
-          <label className="control-handle">
-            Handle used for join/ready
-            <input
-              type="text"
-              value={participantHandle}
-              onChange={(event) => setParticipantHandle(event.target.value)}
-              placeholder="chemist-01"
-            />
-          </label>
+          <div className="panel-heading">
+            <h2>Control handle & queue</h2>
+            <span>Ready + matchmaking identity</span>
+          </div>
+          <div className="control-grid">
+            <label className="control-handle">
+              Handle used for join/ready
+              <input
+                type="text"
+                value={participantHandle}
+                onChange={(event) => setParticipantHandle(event.target.value)}
+                placeholder="chemist-01"
+              />
+            </label>
+
+            <form className="queue-form" onSubmit={handleQueueJoin}>
+              <label>
+                Queue mode
+                <select value={queueMode} onChange={(event) => setQueueMode(event.target.value as MatchMode)}>
+                  <option value="speedrun">Speedrun</option>
+                  <option value="endurance">Endurance</option>
+                  <option value="sandbox">Sandbox</option>
+                </select>
+              </label>
+              <div className="queue-buttons">
+                <button
+                  type="submit"
+                  disabled={queueMutation.isPending || !participantHandle || Boolean(activeTicket)}
+                >
+                  {queueMutation.isPending ? "Enqueuing..." : activeTicket ? "In queue" : "Enter queue"}
+                </button>
+                {activeTicket && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleQueueLeave}
+                    disabled={cancelTicketMutation.isPending}
+                  >
+                    {cancelTicketMutation.isPending ? "Leaving..." : "Leave queue"}
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+          {activeTicket && (
+            <div className="ticket-pill">
+              <p>
+                Ticket <strong>{activeTicket.ticketId}</strong> · waiting {activeTicket.waitSeconds}s · spread cap ±
+                {activeTicket.spreadCap}
+              </p>
+            </div>
+          )}
         </section>
 
-        {(actionError || roomsQuery.error) && (
+        {(actionError || roomsQuery.error || competitiveQuery.error) && (
           <p className="error-banner">
             {actionError ||
               (roomsQuery.error instanceof Error
                 ? roomsQuery.error.message
-                : "Unable to load rooms")}
+                : competitiveQuery.error instanceof Error
+                  ? competitiveQuery.error.message
+                  : "Unable to load lobby state")}
           </p>
         )}
+
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Competitive snapshot</h2>
+            <span>{dashboardHandle || "Set a handle"}</span>
+          </div>
+          {competitiveQuery.isLoading ? (
+            <p className="muted">Syncing ladder data…</p>
+          ) : !profile ? (
+            <p className="muted">Enter a handle above to surface ladder data.</p>
+          ) : (
+            <div className="ladder-grid">
+              {ladderEntries.map(({ mode: ladderMode, snapshot, isActive }) => (
+                <article
+                  key={ladderMode}
+                  className={`ladder-card${isActive ? " ladder-card--active" : ""}`}
+                >
+                  <header>
+                    <p className="eyebrow">{ladderMode}</p>
+                    <h3>
+                      {snapshot.division} {snapshot.tier}
+                    </h3>
+                  </header>
+                  <p className="ladder-metric">
+                    Rating <strong>{snapshot.rating}</strong>{" "}
+                    {snapshot.provisionalMatches > 0 && <span className="muted">(provisional)</span>}
+                  </p>
+                  <p className="ladder-metric">RD {snapshot.deviation} · σ {snapshot.volatility}</p>
+                  <p className="ladder-metric">
+                    Matches {snapshot.matchesPlayed} ·{" "}
+                    {snapshot.lastPlayedAt ? new Date(snapshot.lastPlayedAt).toLocaleDateString() : "No games logged"}
+                  </p>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Matchmaking queues</h2>
+            <span>{totalQueueDepth} searching</span>
+          </div>
+          {queueSnapshots.length === 0 ? (
+            <p className="muted">Queue telemetry populates as soon as players enter.</p>
+          ) : (
+            <div className="queue-grid">
+              {queueSnapshots.map((snapshot: QueueModeSnapshot) => (
+                <article key={snapshot.mode} className="queue-card">
+                  <header>
+                    <p className="eyebrow">{snapshot.mode}</p>
+                    <h3>{snapshot.queueDepth} searching</h3>
+                  </header>
+                  <p className="muted">Avg rating {snapshot.averageRating || "—"}</p>
+                  <p className="muted">Longest wait {snapshot.longestWaitSeconds}s</p>
+                  <ul className="queue-card__tickets">
+                    {snapshot.tickets.map((ticket) => (
+                      <li key={ticket.ticketId}>
+                        <span>{ticket.handle}</span>
+                        <small>
+                          {ticket.rating} · {ticket.waitSeconds}s
+                        </small>
+                      </li>
+                    ))}
+                    {snapshot.tickets.length === 0 && <li className="muted">Waiting for players…</li>}
+                  </ul>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Recent pairings</h2>
+            <span>{pendingMatches.length} tracked</span>
+          </div>
+          {pendingMatches.length === 0 ? (
+            <p className="muted">Pairings appear once the queue forms stage-ready matches.</p>
+          ) : (
+            <ul className="match-list">
+              {pendingMatches.map((match) => (
+                <li key={match.roomId}>
+                  <div>
+                    <strong>{match.handles.join(" vs ")}</strong>
+                    {match.botFilled && <span className="badge badge--bot">Bot fill</span>}
+                  </div>
+                  <small>
+                    {match.mode} · spread ±{match.ratingSpread} ·{" "}
+                    {match.expectedDeltas
+                      .map((delta) => `${delta.handle} ${Math.round(delta.winChance * 100)}%`)
+                      .join(" / ")}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
 
         <section className="panel">
           <div className="panel-heading">

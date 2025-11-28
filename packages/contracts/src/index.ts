@@ -55,6 +55,96 @@ export interface RouteDefinition {
 
 export type MatchMode = "speedrun" | "endurance" | "sandbox";
 
+export type LadderDivision =
+  | "Bronze"
+  | "Argentum"
+  | "Aurum"
+  | "Platinum"
+  | "Iridium"
+  | "Philosopher";
+
+export type DivisionTier = "V" | "IV" | "III" | "II" | "I";
+
+export interface RatingDeltaPreview {
+  readonly handle: string;
+  readonly winChance: number;
+  readonly expectedDelta: number;
+  readonly winDelta: number;
+  readonly lossDelta: number;
+}
+
+export interface LadderRatingSnapshot {
+  readonly ladder: MatchMode;
+  readonly rating: number;
+  readonly deviation: number;
+  readonly volatility: number;
+  readonly matchesPlayed: number;
+  readonly lastPlayedAt?: string;
+  readonly provisionalMatches: number;
+  readonly division: LadderDivision;
+  readonly tier: DivisionTier;
+}
+
+export interface CompetitiveProfile {
+  readonly handle: string;
+  readonly region: string;
+  readonly calibrationsRemaining: number;
+  readonly hiddenRating: number;
+  readonly ladders: Record<MatchMode, LadderRatingSnapshot>;
+  readonly specializations: string[];
+  readonly lastUpdated: string;
+}
+
+export type TicketStatus = "searching" | "matched" | "expired";
+
+export interface MatchmakingTicketSummary {
+  readonly ticketId: string;
+  readonly handle: string;
+  readonly mode: MatchMode;
+  readonly rating: number;
+  readonly deviation: number;
+  readonly joinedAt: string;
+  readonly waitSeconds: number;
+  readonly spreadCap: number;
+  readonly status: TicketStatus;
+  readonly partyHandles?: string[];
+  readonly isBot?: boolean;
+}
+
+export interface QueueModeSnapshot {
+  readonly mode: MatchMode;
+  readonly queueDepth: number;
+  readonly averageRating: number;
+  readonly longestWaitSeconds: number;
+  readonly tickets: MatchmakingTicketSummary[];
+}
+
+export interface CompetitiveMatchPreview {
+  readonly roomId: string;
+  readonly mode: MatchMode;
+  readonly handles: string[];
+  readonly ratingSpread: number;
+  readonly createdAt: string;
+  readonly expectedDeltas: RatingDeltaPreview[];
+  readonly botFilled?: boolean;
+}
+
+export interface CompetitiveDashboardPayload {
+  readonly generatedAt: string;
+  readonly profile?: CompetitiveProfile;
+  readonly activeTicket?: MatchmakingTicketSummary;
+  readonly queues: QueueModeSnapshot[];
+  readonly pendingMatches: CompetitiveMatchPreview[];
+}
+
+export interface RoomCompetitiveContext {
+  readonly isRated: boolean;
+  readonly queueTicketIds?: string[];
+  readonly ratingSpread?: number;
+  readonly expectedDeltas?: RatingDeltaPreview[];
+  readonly botFilled?: boolean;
+}
+
 export interface CountdownState {
   readonly state: "idle" | "pending" | "running" | "completed";
   readonly countdownSeconds: number;
@@ -83,4 +173,5 @@ export interface MatchRoom {
   readonly countdown: CountdownState;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly competitive?: RoomCompetitiveContext;
 }

@@ -44,6 +44,27 @@
   min-width: 8rem;
 }
 
+.room-card__competitive {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.5rem;
+}
+
+.room-card__competitive ul {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.room-card__competitive li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+}
+
 .badge {
   padding: 0.25rem 0.75rem;
   border-radius: 999px;

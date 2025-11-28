@@ -25,6 +25,7 @@ export const RoomCard = ({
   const readyLabel = participant?.ready ? "Set Not Ready" : "Ready Up";
   const countdownLabel =
     room.countdown.state === "running" ? "Countdown Running" : "Start Countdown";
+  const competitive = room.competitive;
 
   return (
     <article className="room-card">
@@ -64,6 +65,29 @@ export const RoomCard = ({
           {room.participants.length === 0 && <li className="muted">No players yet.</li>}
         </ul>
       </section>
+
+      {competitive && (
+        <section className="room-card__competitive">
+          <h4>Competitive context</h4>
+          <p className="muted">
+            {competitive.isRated ? "Rated ladder pairing" : "Sandbox queue"} · spread cap ±
+            {competitive.ratingSpread ?? 0}
+          </p>
+          {competitive.expectedDeltas && competitive.expectedDeltas.length > 0 && (
+            <ul>
+              {competitive.expectedDeltas.map((delta) => (
+                <li key={delta.handle}>
+                  <span>{delta.handle}</span>
+                  <small>
+                    {Math.round(delta.winChance * 100)}% win · {delta.winDelta.toFixed(1)} /{" "}
+                    {delta.lossDelta.toFixed(1)} Δ
+                  </small>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <footer className="room-card__actions">
         <button

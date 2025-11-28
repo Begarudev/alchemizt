@@ -45,4 +45,11 @@
 6. Are specialization unlocks balanced so they encourage exploring new chemistry topics without overwhelming casual players?
 7. Should contest weighting favor late rounds this heavily, or do we risk discouraging early-round upsets?
 
+## Prototype Implementation Snapshot (Stage 6)
+
+- **Match Orchestrator**: Extended the service with a Glicko-lite rating store, queue ticket management, bot fillers, and result ingestion endpoints (`/matchmaking/enqueue`, `/competitive/dashboard`, `/competitive/matches/:roomId/result`), aligning directly with the above design.
+- **Rating/queue telemetry**: Each `MatchRoom` now carries `RoomCompetitiveContext`, exposing expected deltas, spread caps, and bot-fill metadata so consumers can visualize competitive context inline.
+- **Frontend lobby**: The Vite shell surfaces live ladder snapshots, queue depth cards, pairing history, and ready/queue controls tied to the player handle, enabling “Stage 6” flows without leaving the lobby.
+- **Contracts package**: Shared types for ladder snapshots, tickets, dashboards, and competitive metadata ensure backend and frontend stay in lockstep as we iterate toward the next milestone.
+
 
