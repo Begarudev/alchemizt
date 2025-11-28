@@ -26,19 +26,43 @@ export const RoomCard = ({
   const countdownLabel =
     room.countdown.state === "running" ? "Countdown Running" : "Start Countdown";
   const competitive = room.competitive;
+  const puzzle = room.puzzleMetadata;
 
   return (
     <article className="room-card">
       <header className="room-card__header">
         <div>
-          <p className="eyebrow">{room.puzzleId}</p>
-          <h3>{room.id}</h3>
+          <p className="eyebrow">{puzzle?.theme ?? "Puzzle"}</p>
+          <h3>{puzzle?.title ?? room.puzzleId}</h3>
           <p className="muted">
-            Mode: <strong>{room.mode}</strong> · Timer: {room.timerConfig.totalSeconds}s
+            Room <strong>{room.id}</strong> · Mode: <strong>{room.mode}</strong> · Timer:{" "}
+            {room.timerConfig.totalSeconds}s
           </p>
         </div>
         <span className={`badge badge--${room.status}`}>{room.status}</span>
       </header>
+
+      {puzzle && (
+        <section className="room-card__puzzle">
+          <p className="muted">
+            {puzzle.difficulty.toUpperCase()} · target {puzzle.targetMolecule} · est{" "}
+            {puzzle.estimatedSeconds}s
+          </p>
+          <p className="muted">
+            Ref {puzzle.referenceSteps} steps · cost {puzzle.referenceCost}
+          </p>
+          <ul className="tag-list">
+            {puzzle.topicTags.map((tag) => (
+              <li key={tag} className="tag-chip">
+                {tag}
+              </li>
+            ))}
+          </ul>
+          {puzzle.commonPitfalls.length > 0 && (
+            <small className="muted">Watch for: {puzzle.commonPitfalls[0]}</small>
+          )}
+        </section>
+      )}
 
       <section>
         <p className="muted">

@@ -20,6 +20,13 @@ import {
   TicketStatus,
 } from "@alchemizt/contracts";
 import { createServiceApp } from "@alchemizt/http-kit";
+import { getPuzzleById, listPuzzles } from "./puzzleCatalog.js";
+import {
+  recordCountdownStarted,
+  recordMatchResult,
+  recordReadyToggled,
+  recordRoomCreated,
+} from "./analyticsLogger.js";
 
 const routes: RouteDefinition[] = [
   {
@@ -56,6 +63,18 @@ const routes: RouteDefinition[] = [
     method: "GET",
     path: "/rooms",
     description: "List all active prototype rooms",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "GET",
+    path: "/puzzles",
+    description: "List all Stage 10 puzzle catalog entries",
+    handledBy: ServiceName.MatchOrchestrator,
+  },
+  {
+    method: "GET",
+    path: "/puzzles/:puzzleId",
+    description: "Inspect a single puzzle catalog entry",
     handledBy: ServiceName.MatchOrchestrator,
   },
   {
@@ -136,6 +155,8 @@ const MAX_RD = 400;
 const MIN_RD = 35;
 const MATCH_HISTORY_LIMIT = 12;
 const MATCHMAKING_MODES: MatchMode[] = ["speedrun", "endurance", "sandbox"];
+const MVP_ROOM_MODES: MatchMode[] = ["speedrun", "endurance"];
+const DEFAULT_PUZZLE_ID = listPuzzles()[0]?.metadata.id ?? "pz-carbonyl-01";
 const DIVISION_CONFIG: Array<{ division: LadderDivision; floor: number; ceiling: number }> = [
   { division: "Bronze", floor: 0, ceiling: 1199 },
   { division: "Argentum", floor: 1200, ceiling: 1399 },
@@ -742,34 +763,72 @@ const service = createServiceApp({
   enableCors: true,
   routes,
   register: (router) => {
+    router.get("/puzzles", (_req, res) => {
+      res.json({ puzzles: listPuzzles() });
+    });
+
+    router.get("/puzzles/:puzzleId", (req, res) => {
+      const puzzleId = (req.params.puzzleId ?? "").trim();
+      const entry = getPuzzleById(puzzleId);
+      if (!entry) {
+        res.status(404).json({ error: "puzzle_not_found", puzzleId });
+        return;
+      }
+      res.json(entry);
+    });
+
     router.post("/rooms", (req, res) => {
-      const {
-        hostHandle = "host",
-        mode = "speedrun",
-        puzzleId = "pz_001",
-        countdownSeconds = 5,
-        totalSeconds = 300,
-      }: {
-        hostHandle?: string;
-        mode?: MatchMode;
-        puzzleId?: string;
-        countdownSeconds?: number;
-        totalSeconds?: number;
-      } = req.body ?? {};
+      const requestBody = (req.body ?? {}) as Partial<{
+        hostHandle: string;
+        mode: MatchMode;
+        puzzleId: string;
+        hostUserId: string;
+      }>;
+      const requestedMode: MatchMode =
+        typeof requestBody.mode === "string" && MATCHMAKING_MODES.includes(requestBody.mode as MatchMode)
+          ? (requestBody.mode as MatchMode)
+          : "speedrun";
+      if (!MVP_ROOM_MODES.includes(requestedMode)) {
+        res.status(400).json({ error: "mode_not_permitted", allowedModes: MVP_ROOM_MODES });
+        return;
+      }
+      const requestedPuzzleId =
+        typeof requestBody.puzzleId === "string" && requestBody.puzzleId.trim().length > 0
+          ? requestBody.puzzleId.trim()
+          : DEFAULT_PUZZLE_ID;
+      const puzzleEntry = getPuzzleById(requestedPuzzleId);
+      if (!puzzleEntry) {
+        res.status(400).json({ error: "puzzle_not_found", puzzleId: requestedPuzzleId });
+        return;
+      }
+      if (!puzzleEntry.metadata.modeAvailability.includes(requestedMode)) {
+        res.status(400).json({
+          error: "puzzle_mode_not_available",
+          allowedModes: puzzleEntry.metadata.modeAvailability,
+        });
+        return;
+      }
+
+      const hostHandle =
+        typeof requestBody.hostHandle === "string" && requestBody.hostHandle.trim().length > 0
+          ? requestBody.hostHandle.trim()
+          : "host";
 
       const roomId = `room_${Date.now()}`;
       const timestamp = nowIso();
+      const { countdownSeconds, totalSeconds } = puzzleEntry.timerPreset;
 
       const hostParticipant = buildParticipant({
         handle: hostHandle,
         role: "host",
-        userId: req.body?.hostUserId,
+        userId: requestBody?.hostUserId,
       });
 
       const room: MatchRoom = {
         id: roomId,
-        puzzleId,
-        mode,
+        puzzleId: puzzleEntry.metadata.id,
+        puzzleMetadata: puzzleEntry.metadata,
+        mode: requestedMode,
         websocketChannel: `match:${roomId}`,
         participants: [hostParticipant],
         timerConfig: {
@@ -783,6 +842,12 @@ const service = createServiceApp({
       };
 
       upsertRoom(room);
+      recordRoomCreated({
+        roomId,
+        puzzleId: room.puzzleId,
+        mode: room.mode,
+        participantHandles: room.participants.map((participant) => participant.handle),
+      });
       res.status(201).json(room);
     });
 
@@ -799,6 +864,14 @@ const service = createServiceApp({
 
       const updatedRoom = applyReadyState(room, participantId, req.body?.ready);
       upsertRoom(updatedRoom);
+      const toggledParticipant = updatedRoom.participants.find((entry) => entry.id === participantId);
+      if (toggledParticipant) {
+        recordReadyToggled({
+          roomId: updatedRoom.id,
+          participantId,
+          ready: toggledParticipant.ready,
+        });
+      }
       res.json(updatedRoom);
     });
 
@@ -830,6 +903,13 @@ const service = createServiceApp({
         status,
       };
       upsertRoom(updatedRoom);
+      if (action === "start") {
+        recordCountdownStarted({
+          roomId: updatedRoom.id,
+          puzzleId: updatedRoom.puzzleId,
+          countdownSeconds: countdown.countdownSeconds,
+        });
+      }
       res.json(updatedRoom);
     });
 
@@ -934,13 +1014,31 @@ const service = createServiceApp({
         res.status(400).json({ error: "invalid_mode" });
         return;
       }
+      const normalizedWinner = winnerHandle.trim().toLowerCase();
+      const normalizedLoser = loserHandle.trim().toLowerCase();
       const payload = applyMatchResult(req.params.roomId, {
-        winnerHandle: winnerHandle.trim().toLowerCase(),
-        loserHandle: loserHandle.trim().toLowerCase(),
+        winnerHandle: normalizedWinner,
+        loserHandle: normalizedLoser,
         mode,
         puzzleTier: req.body?.puzzleTier,
         refereeConfidence: req.body?.refereeConfidence,
         timeRemainingSeconds: req.body?.timeRemainingSeconds,
+      });
+      const room = activeRooms.get(req.params.roomId);
+      const durationSeconds =
+        typeof req.body?.durationSeconds === "number"
+          ? req.body.durationSeconds
+          : typeof room?.timerConfig.totalSeconds === "number"
+            ? Math.max(
+                0,
+                room.timerConfig.totalSeconds - (Number(req.body?.timeRemainingSeconds) || 0),
+              )
+            : 0;
+      recordMatchResult({
+        roomId: req.params.roomId,
+        puzzleId: room?.puzzleId ?? req.body?.puzzleId ?? "unknown",
+        winnerHandle: normalizedWinner,
+        durationSeconds,
       });
       res.json(payload);
     });

@@ -1,12 +1,13 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import type { FormEvent } from "react";
-import type { MatchMode, MatchRoom, QueueModeSnapshot } from "@alchemizt/contracts";
+import type { MatchMode, MatchRoom, PuzzleCatalogEntry, QueueModeSnapshot } from "@alchemizt/contracts";
 import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import RoomCard from "../components/RoomCard";
 import {
   MATCH_SERVICE_URL,
   createRoom,
   fetchRooms,
+  fetchPuzzleCatalog,
   fetchCompetitiveDashboard,
   joinRoom,
   startCountdown,
@@ -43,23 +44,25 @@ export const LobbyPage = () => {
     participantHandle,
     mode,
     puzzleId,
-    countdownSeconds,
-    totalSeconds,
     setHostHandle,
     setParticipantHandle,
     setMode,
     setPuzzleId,
-    setCountdownSeconds,
-    setTotalSeconds,
   } = usePreferencesStore();
   const [actionError, setActionError] = useState<string | null>(null);
   const [queueMode, setQueueMode] = useState<MatchMode>("speedrun");
-
   const roomsQuery = useQuery({
     queryKey: ["rooms"],
     queryFn: fetchRooms,
     select: (data) => data.rooms ?? [],
     refetchInterval: POLL_MS,
+  });
+
+  const puzzlesQuery = useQuery({
+    queryKey: ["puzzles"],
+    queryFn: fetchPuzzleCatalog,
+    select: (data) => data.puzzles ?? [],
+    staleTime: 60_000,
   });
 
   const dashboardHandle = participantHandle || hostHandle;
@@ -70,14 +73,60 @@ export const LobbyPage = () => {
     refetchInterval: POLL_MS,
   });
 
+  const puzzleCatalog: PuzzleCatalogEntry[] = useMemo(
+    () => puzzlesQuery.data ?? [],
+    [puzzlesQuery.data],
+  );
+  const selectedPuzzle = useMemo(
+    () => puzzleCatalog.find((entry) => entry.metadata.id === puzzleId),
+    [puzzleCatalog, puzzleId],
+  );
+  const allowedModes = selectedPuzzle?.metadata.modeAvailability ?? (["speedrun"] as MatchMode[]);
+
+  useEffect(() => {
+    if (!puzzleCatalog.length) {
+      return;
+    }
+    const hasSelected = puzzleCatalog.some((entry) => entry.metadata.id === puzzleId);
+    if (!hasSelected) {
+      const fallback = puzzleCatalog[0];
+      setPuzzleId(fallback.metadata.id);
+      setMode(fallback.metadata.modeAvailability[0]);
+    }
+  }, [puzzleCatalog, puzzleId, setMode, setPuzzleId]);
+
+  useEffect(() => {
+    if (!selectedPuzzle) {
+      return;
+    }
+    if (!selectedPuzzle.metadata.modeAvailability.includes(mode)) {
+      setMode(selectedPuzzle.metadata.modeAvailability[0]);
+    }
+  }, [mode, selectedPuzzle, setMode]);
+
+  const handlePuzzleSelect = useCallback(
+    (nextPuzzleId: string) => {
+      setPuzzleId(nextPuzzleId);
+      const entry = puzzleCatalog.find((puzzle) => puzzle.metadata.id === nextPuzzleId);
+      if (entry && !entry.metadata.modeAvailability.includes(mode)) {
+        setMode(entry.metadata.modeAvailability[0]);
+      }
+    },
+    [mode, puzzleCatalog, setMode, setPuzzleId],
+  );
+
+  const queryErrorMessage =
+    (roomsQuery.error instanceof Error && roomsQuery.error.message) ||
+    (competitiveQuery.error instanceof Error && competitiveQuery.error.message) ||
+    (puzzlesQuery.error instanceof Error && puzzlesQuery.error.message) ||
+    null;
+
   const createRoomMutation = useMutation({
     mutationFn: () =>
       createRoom({
         hostHandle,
         puzzleId,
         mode,
-        countdownSeconds,
-        totalSeconds,
       }),
     onSuccess: () => {
       setActionError(null);
@@ -151,9 +200,13 @@ export const LobbyPage = () => {
         setActionError("Host handle is required");
         return;
       }
+      if (!selectedPuzzle) {
+        setActionError("Select a puzzle from the catalog");
+        return;
+      }
       createRoomMutation.mutate();
     },
-    [createRoomMutation, hostHandle],
+    [createRoomMutation, hostHandle, selectedPuzzle],
   );
 
   const handleJoin = useCallback(
@@ -268,48 +321,76 @@ export const LobbyPage = () => {
             </label>
 
             <label>
-              Puzzle ID
-              <input
-                type="text"
-                value={puzzleId}
-                onChange={(event) => setPuzzleId(event.target.value)}
-                placeholder="pz_001"
-              />
+              Puzzle
+              {puzzlesQuery.isLoading ? (
+                <input type="text" value="Loading catalog…" disabled />
+              ) : puzzleCatalog.length === 0 ? (
+                <input type="text" value="No puzzles available" disabled />
+              ) : (
+                <select value={puzzleId} onChange={(event) => handlePuzzleSelect(event.target.value)}>
+                  {puzzleCatalog.map((entry) => (
+                    <option key={entry.metadata.id} value={entry.metadata.id}>
+                      {entry.metadata.title} · {entry.metadata.difficulty}
+                    </option>
+                  ))}
+                </select>
+              )}
             </label>
 
             <label>
               Mode
-              <select value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}>
-                <option value="speedrun">Speedrun</option>
-                <option value="endurance">Endurance</option>
-                <option value="sandbox">Sandbox</option>
+              <select value={mode} onChange={(event) => setMode(event.target.value as MatchMode)}>
+                {allowedModes.map((allowedMode) => (
+                  <option key={allowedMode} value={allowedMode}>
+                    {allowedMode === "speedrun"
+                      ? "Speedrun · solo practice"
+                      : allowedMode === "endurance"
+                        ? "Endurance · 1v1"
+                        : allowedMode}
+                  </option>
+                ))}
               </select>
-            </label>
-
-            <label>
-              Countdown (seconds)
-              <input
-                type="number"
-                min={3}
-                value={countdownSeconds}
-                onChange={(event) => setCountdownSeconds(Number(event.target.value))}
-              />
-            </label>
-
-            <label>
-              Total time (seconds)
-              <input
-                type="number"
-                min={60}
-                value={totalSeconds}
-                onChange={(event) => setTotalSeconds(Number(event.target.value))}
-              />
             </label>
 
             <button type="submit" disabled={isMutating}>
               {createRoomMutation.isPending ? "Creating..." : "Create room"}
             </button>
           </form>
+          {selectedPuzzle ? (
+            <div className="puzzle-summary">
+              <div>
+                <p className="eyebrow">{selectedPuzzle.metadata.theme}</p>
+                <h3>{selectedPuzzle.metadata.title}</h3>
+                <p className="muted">
+                  {selectedPuzzle.metadata.difficulty.toUpperCase()} · target {selectedPuzzle.metadata.targetMolecule}
+                </p>
+                <p className="muted">
+                  Est. {selectedPuzzle.metadata.estimatedSeconds}s · Reference{" "}
+                  {selectedPuzzle.metadata.referenceSteps} steps · Cost{" "}
+                  {selectedPuzzle.metadata.referenceCost}
+                </p>
+              </div>
+              <ul className="tag-list">
+                {selectedPuzzle.metadata.topicTags.map((tag) => (
+                  <li key={tag} className="tag-chip">
+                    {tag}
+                  </li>
+                ))}
+              </ul>
+              {selectedPuzzle.metadata.commonPitfalls.length > 0 && (
+                <small className="muted">
+                  Pitfall spotlight: {selectedPuzzle.metadata.commonPitfalls[0]}
+                </small>
+              )}
+              {selectedPuzzle.metadata.description && (
+                <p className="muted">{selectedPuzzle.metadata.description}</p>
+              )}
+            </div>
+          ) : puzzlesQuery.isLoading ? (
+            <p className="muted">Loading puzzle catalog…</p>
+          ) : (
+            <p className="muted">Puzzle catalog unavailable.</p>
+          )}
         </section>
 
         <section className="panel">
@@ -367,14 +448,9 @@ export const LobbyPage = () => {
           )}
         </section>
 
-        {(actionError || roomsQuery.error || competitiveQuery.error) && (
+        {(actionError || queryErrorMessage) && (
           <p className="error-banner">
-            {actionError ||
-              (roomsQuery.error instanceof Error
-                ? roomsQuery.error.message
-                : competitiveQuery.error instanceof Error
-                  ? competitiveQuery.error.message
-                  : "Unable to load lobby state")}
+            {actionError ?? queryErrorMessage ?? "Unable to load lobby state"}
           </p>
         )}
 

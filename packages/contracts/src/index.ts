@@ -162,6 +162,7 @@ export interface RoomParticipant {
 export interface MatchRoom {
   readonly id: string;
   readonly puzzleId: string;
+  readonly puzzleMetadata?: PuzzleMetadata;
   readonly mode: MatchMode;
   readonly websocketChannel: string;
   readonly participants: RoomParticipant[];
@@ -175,3 +176,86 @@ export interface MatchRoom {
   readonly updatedAt: string;
   readonly competitive?: RoomCompetitiveContext;
 }
+
+export type PuzzleDifficulty = "practice" | "advanced" | "contest";
+
+export interface PuzzleMetadata {
+  readonly id: string;
+  readonly title: string;
+  readonly targetMolecule: string;
+  readonly difficulty: PuzzleDifficulty;
+  readonly estimatedSeconds: number;
+  readonly referenceSteps: number;
+  readonly referenceCost: number;
+  readonly topicTags: string[];
+  readonly theme: string;
+  readonly allowedReactions: string[];
+  readonly restrictedReagents?: string[];
+  readonly modeAvailability: MatchMode[];
+  readonly commonPitfalls: string[];
+  readonly description?: string;
+}
+
+export interface PuzzleCatalogEntry {
+  readonly metadata: PuzzleMetadata;
+  readonly timerPreset: {
+    readonly countdownSeconds: number;
+    readonly totalSeconds: number;
+  };
+}
+
+export type AnalyticsEventType =
+  | "room.created"
+  | "room.ready_toggled"
+  | "room.countdown_started"
+  | "match.result_recorded";
+
+export interface AnalyticsEventBase<TType extends AnalyticsEventType, TPayload> {
+  readonly type: TType;
+  readonly occurredAt: string;
+  readonly payload: TPayload;
+}
+
+export type RoomCreatedEvent = AnalyticsEventBase<
+  "room.created",
+  {
+    readonly roomId: string;
+    readonly puzzleId: string;
+    readonly mode: MatchMode;
+    readonly participantHandles: string[];
+  }
+>;
+
+export type RoomReadyToggledEvent = AnalyticsEventBase<
+  "room.ready_toggled",
+  {
+    readonly roomId: string;
+    readonly participantId: string;
+    readonly ready: boolean;
+  }
+>;
+
+export type CountdownStartedEvent = AnalyticsEventBase<
+  "room.countdown_started",
+  {
+    readonly roomId: string;
+    readonly puzzleId: string;
+    readonly countdownSeconds: number;
+  }
+>;
+
+export type MatchResultRecordedEvent = AnalyticsEventBase<
+  "match.result_recorded",
+  {
+    readonly roomId: string;
+    readonly puzzleId: string;
+    readonly winnerHandle: string;
+    readonly durationSeconds: number;
+  }
+>;
+
+export type AnalyticsEvent =
+  | RoomCreatedEvent
+  | RoomReadyToggledEvent
+  | CountdownStartedEvent
+  | MatchResultRecordedEvent;

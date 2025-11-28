@@ -3,6 +3,7 @@ import type {
   MatchMode,
   MatchRoom,
   MatchmakingTicketSummary,
+  PuzzleCatalogEntry,
   RoomParticipant,
 } from "@alchemizt/contracts";
 
@@ -42,8 +43,6 @@ export interface CreateRoomPayload {
   readonly hostUserId?: string;
   readonly puzzleId: string;
   readonly mode: MatchMode;
-  readonly countdownSeconds?: number;
-  readonly totalSeconds?: number;
 }
 
 export interface JoinRoomPayload {
@@ -68,6 +67,10 @@ export interface MatchResultPayload {
 }
 
 export const fetchRooms = () => jsonRequest<{ rooms: MatchRoom[] }>("/rooms");
+
+export const fetchPuzzleCatalog = () => jsonRequest<{ puzzles: PuzzleCatalogEntry[] }>("/puzzles");
+
+export const fetchPuzzleById = (puzzleId: string) => jsonRequest<PuzzleCatalogEntry>(`/puzzles/${puzzleId}`);
 
 export const createRoom = (payload: CreateRoomPayload) =>
   jsonRequest<MatchRoom>("/rooms", {

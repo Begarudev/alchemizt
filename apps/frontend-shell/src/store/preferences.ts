@@ -6,23 +6,17 @@ interface PreferencesState {
   participantHandle: string;
   mode: MatchMode;
   puzzleId: string;
-  countdownSeconds: number;
-  totalSeconds: number;
   setHostHandle: (handle: string) => void;
   setParticipantHandle: (handle: string) => void;
   setMode: (mode: MatchMode) => void;
   setPuzzleId: (puzzleId: string) => void;
-  setCountdownSeconds: (seconds: number) => void;
-  setTotalSeconds: (seconds: number) => void;
 }
 
 const DEFAULT_STATE: Omit<PreferencesState, keyof PreferencesActions> = {
   hostHandle: "chemist-host",
   participantHandle: "chemist-01",
   mode: "speedrun",
-  puzzleId: "pz_001",
-  countdownSeconds: 5,
-  totalSeconds: 300,
+  puzzleId: "pz-carbonyl-01",
 } as const;
 
 type PreferencesActions = Pick<
@@ -31,8 +25,6 @@ type PreferencesActions = Pick<
   | "setParticipantHandle"
   | "setMode"
   | "setPuzzleId"
-  | "setCountdownSeconds"
-  | "setTotalSeconds"
 >;
 
 export const usePreferencesStore = create<PreferencesState>((set) => ({
@@ -41,7 +33,5 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   setParticipantHandle: (participantHandle) => set({ participantHandle }),
   setMode: (mode) => set({ mode }),
   setPuzzleId: (puzzleId) => set({ puzzleId }),
-  setCountdownSeconds: (countdownSeconds) => set({ countdownSeconds }),
-  setTotalSeconds: (totalSeconds) => set({ totalSeconds }),
 }));
 

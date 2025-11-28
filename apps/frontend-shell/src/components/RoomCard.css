@@ -17,6 +17,18 @@
   gap: 1rem;
 }
 
+.room-card__puzzle {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.room-card__puzzle .tag-list {
+  margin-top: 0.25rem;
+}
+
 .room-card__participants ul {
   list-style: none;
   padding: 0;
